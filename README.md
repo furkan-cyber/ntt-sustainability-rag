@@ -4,7 +4,7 @@ Bu proje, NTT DATA'nın sürdürülebilirlik raporları üzerinde RAG (Retrieval
 
 ## 📋 İçindekiler
 
-- [Özellikler](#özellikler)
+- [Özellikler](#Özellikler)
 - [Teknoloji Stack](#teknoloji-stack)
 - [Kurulum](#kurulum)
 - [Kullanım](#kullanım)
