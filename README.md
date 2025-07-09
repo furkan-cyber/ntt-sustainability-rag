@@ -84,7 +84,7 @@ Bu proje, NTT DATA'nın sürdürülebilirlik raporları üzerinde RAG (Retrieval
 ### 1. Repository'yi Klonla
 
 ```bash
-git clone https://github.com/your-username/ntt-sustainability-rag.git
+git clone https://github.com/furkan-cyber/ntt-sustainability-rag.git
 cd ntt-sustainability-rag
 ```
 
