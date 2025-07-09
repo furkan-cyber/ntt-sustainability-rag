@@ -510,8 +510,8 @@ Bu proje MIT lisansı altında lisanslanmıştır. Detaylar için `LICENSE` dosy
 ## 🆘 Support
 
 - **Issues**: GitHub Issues kullanın
-- **Documentation**: Bu README dosyası
-- **Email**: your-email@example.com
+- **Documentation**: README.md
+- **Email**: furkanavcioglu11@gmail.com
 
 ## 🔄 Changelog
 
