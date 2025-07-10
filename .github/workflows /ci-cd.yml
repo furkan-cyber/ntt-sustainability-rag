@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  DOCKER_IMAGE: ghcr.io/furkan-cyber/ragnttdata:latest
+  DOCKER_IMAGE: ghcr.io/furkan-cyber/ntt-sustainability-rag:latest
 
 jobs:
   test:
