@@ -2,22 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-NTT DATA Sürdürülebilirlik Raporları RAG Sistemi
+NTT DATA Sürdürülebilirlik Raporları RAG Sistemi - Enhanced Version
 
-Bu modül, NTT DATA'nın sürdürülebilirlik raporları üzerinde RAG (Retrieval-Augmented Generation)
-işlemleri yapan bir servis sağlar.
-
-Özellikler:
-- PDF raporlarını indirme ve işleme
-- Metin chunking ve temizleme
-- Advanced embedding oluşturma
-- Vektör veritabanı entegrasyonu
-- LLM ile cevap oluşturma
-- FastAPI REST arayüzü
-- Docker desteği
-- Unit testler
-- CI/CD entegrasyonu
-- GCP deploy desteği
+This enhanced version includes:
+- KV Cache optimization
+- Agentic framework implementation
+- Advanced prompting techniques
+- Gradio frontend integration
+- Google Cloud ML deployment support
+- FastAPI service enhancements
+- Prometheus monitoring integration
+- Comprehensive pytest test suite
 """
 
 import os
@@ -25,28 +20,35 @@ import re
 import logging
 import requests
 import fitz  # PyMuPDF
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Union
 from datetime import datetime
 from pathlib import Path
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+import time
+import tempfile
+import shutil
+from functools import lru_cache
 
-# NLP ve ML kütüphaneleri
+# Core dependencies
 import numpy as np
+import pandas as pd
+
+# NLP and ML
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from nltk.tokenize import sent_tokenize
 from nltk.corpus import stopwords
 import nltk
 
-# Vektör veritabanı
+# Vector database
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 
-# LLM ve RAG
+# LLM and RAG
 from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
@@ -54,21 +56,37 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import LLMChainExtractor
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from langchain.retrievers.ensemble import EnsembleRetriever
-from langchain.retrievers import BM25Retriever
+from langchain_community.retrievers import BM25Retriever
+from langchain.agents import AgentExecutor, Tool, initialize_agent
+from langchain.memory import ConversationBufferMemory
+from langchain_community.cache import InMemoryCache
+from langchain.globals import set_llm_cache
 
 # Web framework
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
+import gradio as gr
 
-# Konfigürasyon yönetimi
+# Monitoring
+from prometheus_client import start_http_server, Counter, Histogram, Gauge
+from prometheus_fastapi_instrumentator import Instrumentator
+
+# Configuration
 from dotenv import load_dotenv
 
-# GCP desteği
+# GCP integration
 from google.cloud import storage
+from google.cloud import aiplatform
 
-# Loglama ayarları
+# Testing
+import pytest
+from unittest.mock import patch, MagicMock
+
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -76,59 +94,96 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# NLTK verilerini indir
+# Download NLTK data
 nltk.download("punkt", quiet=True)
 nltk.download("stopwords", quiet=True)
 
-# Environment variables
+# Load environment variables
 load_dotenv()
 
+# Prometheus metrics
+REQUEST_COUNT = Counter(
+    'request_count', 'App Request Count',
+    ['method', 'endpoint', 'http_status']
+)
+REQUEST_LATENCY = Histogram(
+    'request_latency_seconds', 'Request latency',
+    ['method', 'endpoint']
+)
+LLM_CALLS = Counter(
+    'llm_calls_total', 'Total LLM calls made'
+)
+VECTOR_DB_SIZE = Gauge(
+    'vector_db_size', 'Size of vector database'
+)
+CACHE_HIT_RATIO = Gauge(
+    'cache_hit_ratio', 'Cache hit ratio'
+)
+
 class Config:
-    """Uygulama konfigürasyon ayarları"""
+    """Enhanced configuration settings"""
+    # Directory configurations
     PDF_STORAGE_DIR = Path("./data/pdfs")
     PROCESSED_DIR = Path("./data/processed")
     VECTOR_DB_DIR = Path("./data/vector_db")
-    CHUNK_SIZE = 1000  # Karakter cinsinden chunk boyutu
-    CHUNK_OVERLAP = 200  # Chunk'lar arası overlap
+    STATIC_DIR = Path("./static")
+    TEST_DIR = Path("./tests")
+    
+    # Chunking settings
+    CHUNK_SIZE = 1000
+    CHUNK_OVERLAP = 200
+    
+    # Model configurations
     EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
     EMBEDDING_DIM = 768
-    COLLECTION_NAME = "ntt_sustainability_reports"
-    LLM_MODEL = "llama3"  # Ollama için model adı
+    COLLECTION_NAME = "ntt_sustainability_reports_v2"
+    LLM_MODEL = "llama3"
     LLM_TEMPERATURE = 0.3
     LLM_MAX_TOKENS = 2000
+    
+    # Server configurations
     FASTAPI_PORT = 8000
     FASTAPI_HOST = "0.0.0.0"
+    GRADIO_PORT = 7860
+    METRICS_PORT = 8001
+    
+    # GCP configurations
     GCP_BUCKET_NAME = os.getenv("GCP_BUCKET_NAME", "")
-    ENABLE_HYDE = True  # Hypothetical Document Embeddings (HyDE) etkinleştirme
-    ENABLE_MULTI_QUERY = True  # Multi-query retrieval etkinleştirme
-    ENABLE_RERANK = True  # Yeniden sıralama etkinleştirme
-    TOP_K_RETRIEVAL = 5  # Alınacak belge sayısı
-    CONFIDENCE_THRESHOLD = 0.7  # Minimum güven eşiği
-
+    GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
+    GCP_REGION = os.getenv("GCP_REGION", "us-central1")
+    
+    # Feature flags
+    ENABLE_HYDE = True
+    ENABLE_MULTI_QUERY = True
+    ENABLE_RERANK = True
+    ENABLE_AGENT = True
+    ENABLE_CACHE = True
+    ENABLE_MONITORING = True
+    
+    # Performance settings
+    TOP_K_RETRIEVAL = 5
+    CONFIDENCE_THRESHOLD = 0.7
+    KV_CACHE_SIZE = 1000
+    MAX_CONCURRENT_WORKERS = 4
+    
     @classmethod
     def setup_dirs(cls):
-        """Gerekli dizinleri oluştur"""
+        """Create required directories"""
         cls.PDF_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
         cls.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
         cls.VECTOR_DB_DIR.mkdir(parents=True, exist_ok=True)
+        cls.STATIC_DIR.mkdir(parents=True, exist_ok=True)
+        cls.TEST_DIR.mkdir(parents=True, exist_ok=True)
 
 Config.setup_dirs()
 
 class DocumentProcessor:
-    """PDF belgelerini işleyen sınıf"""
+    """Enhanced document processor with caching"""
     
     @staticmethod
-    def download_pdf(url: str, save_path: Path) -> bool:
-        """
-        PDF'i indir ve kaydet
-        
-        Args:
-            url: İndirilecek PDF URL'si
-            save_path: Kaydedilecek dosya yolu
-            
-        Returns:
-            bool: İndirme başarılıysa True, değilse False
-        """
+    @lru_cache(maxsize=Config.KV_CACHE_SIZE)
+    def download_pdf(url: str, save_path: str) -> bool:
+        """Cached PDF downloader"""
         try:
             response = requests.get(url, timeout=10)
             response.raise_for_status()
@@ -136,23 +191,16 @@ class DocumentProcessor:
             with open(save_path, "wb") as f:
                 f.write(response.content)
                 
-            logger.info(f"PDF başarıyla indirildi: {save_path}")
+            logger.info(f"PDF downloaded successfully: {save_path}")
             return True
         except Exception as e:
-            logger.error(f"PDF indirme hatası: {e}")
+            logger.error(f"PDF download error: {e}")
             return False
     
     @staticmethod
-    def extract_text_from_pdf(pdf_path: Path) -> str:
-        """
-        PDF'den metin çıkar
-        
-        Args:
-            pdf_path: PDF dosya yolu
-            
-        Returns:
-            str: Çıkarılan metin
-        """
+    @lru_cache(maxsize=Config.KV_CACHE_SIZE)
+    def extract_text_from_pdf(pdf_path: str) -> str:
+        """Cached text extraction"""
         try:
             doc = fitz.open(pdf_path)
             text = ""
@@ -162,28 +210,20 @@ class DocumentProcessor:
                 
             return text
         except Exception as e:
-            logger.error(f"PDF metin çıkarma hatası: {e}")
+            logger.error(f"PDF text extraction error: {e}")
             return ""
     
     @staticmethod
     def clean_text(text: str) -> str:
-        """
-        Metni temizle ve normalize et
-        
-        Args:
-            text: Temizlenecek metin
-            
-        Returns:
-            str: Temizlenmiş metin
-        """
-        # Küçük harfe çevirme (embedding'ler case-sensitive olmayabilir)
+        """Text cleaning with advanced normalization"""
+        # Case normalization
         text = text.lower()
         
-        # Özel karakterleri ve fazla boşlukları kaldır
+        # Advanced special character handling
         text = re.sub(r"[^\w\s-]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
         
-        # Stopword'leri kaldır
+        # Enhanced stopword removal
         stop_words = set(stopwords.words("english"))
         words = text.split()
         words = [word for word in words if word not in stop_words]
@@ -193,157 +233,142 @@ class DocumentProcessor:
     @staticmethod
     def chunk_text(text: str, chunk_size: int = Config.CHUNK_SIZE, 
                    chunk_overlap: int = Config.CHUNK_OVERLAP) -> List[str]:
-        """
-        Metni chunk'lara ayır
-        
-        Args:
-            text: Chunk'lanacak metin
-            chunk_size: Her chunk'ın karakter boyutu
-            chunk_overlap: Chunk'lar arası overlap
-            
-        Returns:
-            List[str]: Chunk'lar listesi
-        """
+        """Improved chunking with sentence boundary awareness"""
+        # Simple chunking if NLTK punkt isn't available
+        words = text.split()
         chunks = []
-        start = 0
+        current_chunk = []
+        current_length = 0
         
-        while start < len(text):
-            end = min(start + chunk_size, len(text))
-            chunk = text[start:end]
-            chunks.append(chunk)
+        for word in words:
+            word_length = len(word) + 1  # +1 for space
             
-            if end == len(text):
-                break
+            if current_length + word_length <= chunk_size:
+                current_chunk.append(word)
+                current_length += word_length
+            else:
+                if current_chunk:
+                    chunks.append(" ".join(current_chunk))
                 
-            start = end - chunk_overlap
+                # Handle overlap
+                if chunk_overlap > 0 and chunks:
+                    last_chunk = chunks[-1].split()
+                    overlap = last_chunk[-chunk_overlap//2:]
+                    current_chunk = overlap + [word]
+                    current_length = len(" ".join(current_chunk))
+                else:
+                    current_chunk = [word]
+                    current_length = word_length
+        
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
             
         return chunks
     
     @staticmethod
     def process_pdf(pdf_path: Path) -> List[Dict[str, Any]]:
-        """
-        PDF'i işle ve chunk'ları hazırla
-        
-        Args:
-            pdf_path: İşlenecek PDF dosya yolu
-            
-        Returns:
-            List[Dict[str, Any]]: Chunk bilgileri listesi
-        """
+        """Enhanced PDF processing with metadata enrichment"""
         try:
-            # PDF'den metni çıkar
-            raw_text = DocumentProcessor.extract_text_from_pdf(pdf_path)
+            raw_text = DocumentProcessor.extract_text_from_pdf(str(pdf_path))
             if not raw_text:
                 return []
             
-            # Metni temizle
             cleaned_text = DocumentProcessor.clean_text(raw_text)
-            
-            # Chunk'lara ayır
             chunks = DocumentProcessor.chunk_text(cleaned_text)
             
-            # Metadata hazırla
+            # Enhanced metadata
             metadata = {
                 "source": pdf_path.name,
                 "year": DocumentProcessor.extract_year_from_filename(pdf_path.name),
-                "processed_at": datetime.now().isoformat()
+                "processed_at": datetime.now().isoformat(),
+                "chunk_count": len(chunks),
+                "document_hash": hashlib.md5(raw_text.encode()).hexdigest()
             }
             
-            # Chunk'ları formatla
             processed_chunks = []
             for i, chunk in enumerate(chunks):
                 chunk_id = f"{pdf_path.stem}_chunk_{i}"
+                chunk_metadata = metadata.copy()
+                chunk_metadata.update({
+                    "chunk_id": chunk_id,
+                    "chunk_index": i,
+                    "chunk_length": len(chunk)
+                })
+                
                 processed_chunks.append({
                     "id": chunk_id,
                     "text": chunk,
-                    "metadata": metadata
+                    "metadata": chunk_metadata
                 })
             
             return processed_chunks
         except Exception as e:
-            logger.error(f"PDF işleme hatası: {e}")
+            logger.error(f"PDF processing error: {e}")
             return []
     
     @staticmethod
     def extract_year_from_filename(filename: str) -> Optional[int]:
-        """
-        Dosya adından yıl bilgisini çıkar
-        
-        Args:
-            filename: Dosya adı
-            
-        Returns:
-            Optional[int]: Bulunan yıl veya None
-        """
-        match = re.search(r"\d{4}", filename)
-        return int(match.group()) if match else None
+        """Improved year extraction with validation"""
+        match = re.search(r"\b(20\d{2})\b", filename)
+        if match:
+            year = int(match.group())
+            if 2000 <= year <= datetime.now().year + 1:
+                return year
+        return None
 
 class VectorDatabase:
-    """Vektör veritabanı işlemlerini yöneten sınıf"""
+    """Enhanced vector database with monitoring"""
     
     def __init__(self):
-        self.client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory=str(Config.VECTOR_DB_DIR)
-        ))
+        self.client = chromadb.PersistentClient(path=str(Config.VECTOR_DB_DIR))
         
-        # Embedding fonksiyonu
         self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name=Config.EMBEDDING_MODEL
         )
         
-        # Koleksiyonu al veya oluştur
         self.collection = self.client.get_or_create_collection(
             name=Config.COLLECTION_NAME,
             embedding_function=self.embedding_function,
-            metadata={"hnsw:space": "cosine"}  # Cosine benzerliği kullan
         )
         
-        logger.info("Vektör veritabanı başlatıldı")
+        # Initialize metrics
+        self.update_metrics()
+        logger.info("Vector database initialized")
+    
+    def update_metrics(self):
+        """Update Prometheus metrics"""
+        try:
+            count = self.collection.count()
+            VECTOR_DB_SIZE.set(count)
+        except Exception as e:
+            logger.error(f"Metrics update error: {e}")
     
     def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
-        """
-        Belge chunk'larını vektör veritabanına ekle
-        
-        Args:
-            documents: Eklenecek belgeler listesi
-            
-        Returns:
-            bool: Ekleme başarılıysa True, değilse False
-        """
+        """Document addition with metrics"""
         try:
             if not documents:
                 return False
                 
-            # Belgeleri ayır
             ids = [doc["id"] for doc in documents]
             texts = [doc["text"] for doc in documents]
             metadatas = [doc["metadata"] for doc in documents]
             
-            # Vektör veritabanına ekle
             self.collection.add(
                 ids=ids,
                 documents=texts,
                 metadatas=metadatas
             )
             
-            logger.info(f"{len(documents)} belge vektör veritabanına eklendi")
+            logger.info(f"Added {len(documents)} documents to vector DB")
+            self.update_metrics()
             return True
         except Exception as e:
-            logger.error(f"Belge ekleme hatası: {e}")
+            logger.error(f"Document addition error: {e}")
             return False
     
     def query(self, query_text: str, top_k: int = Config.TOP_K_RETRIEVAL) -> List[Dict[str, Any]]:
-        """
-        Vektör veritabanında sorgu yap
-        
-        Args:
-            query_text: Sorgu metni
-            top_k: Döndürülecek sonuç sayısı
-            
-        Returns:
-            List[Dict[str, Any]]: Sorgu sonuçları
-        """
+        """Enhanced query with monitoring"""
+        start_time = time.time()
         try:
             results = self.collection.query(
                 query_texts=[query_text],
@@ -351,135 +376,262 @@ class VectorDatabase:
                 include=["documents", "metadatas", "distances"]
             )
             
-            # Sonuçları formatla
             formatted_results = []
             for doc, meta, dist in zip(results["documents"][0], 
-                                       results["metadatas"][0], 
-                                       results["distances"][0]):
+                                     results["metadatas"][0], 
+                                     results["distances"][0]):
                 formatted_results.append({
                     "text": doc,
                     "metadata": meta,
-                    "score": 1 - dist  # Cosine benzerliğine çevir
+                    "score": 1 - dist,
+                    "method": "vector"
                 })
+            
+            latency = time.time() - start_time
+            REQUEST_LATENCY.labels(method="query", endpoint="vector_db").observe(latency)
             
             return formatted_results
         except Exception as e:
-            logger.error(f"Sorgu hatası: {e}")
+            logger.error(f"Query error: {e}")
             return []
 
 class LLMService:
-    """LLM ile etkileşimi yöneten sınıf"""
+    """Enhanced LLM service with advanced prompting and caching"""
     
     def __init__(self):
-        # Ollama LLM'sini başlat (yerel çalıştırıldığını varsayarak)
+        # Initialize LLM with cache
         self.llm = Ollama(
             model=Config.LLM_MODEL,
             temperature=Config.LLM_TEMPERATURE,
             num_ctx=Config.LLM_MAX_TOKENS
         )
         
-        # Prompt şablonları
+        if Config.ENABLE_CACHE:
+            set_llm_cache(InMemoryCache())
+        
+        # Advanced prompt templates
         self.qa_prompt = PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            Sen NTT DATA Business Solutions'ın sürdürülebilirlik raporları hakkında bilgi veren bir asistansın. 
-            Aşağıdaki bağlamı kullanarak soruyu cevapla. Eğer cevabı bilmiyorsan "Bilmiyorum" de.
+            You are an AI assistant specialized in NTT DATA's sustainability reports. 
+            Use the following context to answer the question. If you don't know, say "I don't know".
             
-            Bağlam: {context}
+            Context: {context}
             
-            Sorumlulukların:
-            - Sadece verilen bağlamdaki bilgilere dayanarak cevap ver
-            - Yanlış veya tahmine dayalı bilgi verme
-            - Cevaplarını net ve öz tut
-            - Sürdürülebilirlik odaklı ol
-            - Rakamlar ve verilerle destekle<|eot_id|>
+            Guidelines:
+            1. Be precise and fact-based
+            2. Use bullet points for multiple items
+            3. Include relevant metrics when available
+            4. Reference report years when possible
+            5. For comparisons, highlight trends
+            6. Use markdown for formatting
             
-            <|start_header_id|>user<|end_header_id|>
-            Soru: {question}<|eot_id|>
-            
-            <|start_header_id|>assistant<|end_header_id|>""",
+            Question: {question}
+            Answer:""",
             input_variables=["context", "question"]
         )
         
         self.hyde_prompt = PromptTemplate(
-            template="""Aşağıdaki soruya muhtemel bir cevap yaz. Bu cevap, benzer belgeleri bulmak için kullanılacak.
+            template="""Write a hypothetical answer to this question that would be found in a sustainability report. 
+            Include specific numbers, metrics, and examples where appropriate.
             
-            Soru: {question}
+            Question: {question}
             
-            Muhtemel Cevap:""",
+            Hypothetical Answer:""",
             input_variables=["question"]
         )
         
-        logger.info("LLM servisi başlatıldı")
-    
-    def generate_answer(self, context: str, question: str) -> str:
-        """
-        Bağlam ve soruya dayalı cevap oluştur
+        self.analytical_prompt = PromptTemplate(
+            template="""Analyze this sustainability data and provide insights:
+            {context}
+            
+            Key Insights:
+            1. Trend Analysis:
+            2. Year-over-Year Comparison:
+            3. Key Achievements:
+            4. Areas for Improvement:
+            5. Future Projections:""",
+            input_variables=["context"]
+        )
         
-        Args:
-            context: Cevap için bağlam
-            question: Soru metni
-            
-        Returns:
-            str: Oluşturulan cevap
-        """
+        logger.info("LLM service initialized with advanced prompts")
+
+    @lru_cache(maxsize=Config.KV_CACHE_SIZE)
+    def generate_answer(self, context: str, question: str) -> str:
+        """Cached answer generation with metrics"""
+        LLM_CALLS.inc()
+        start_time = time.time()
+        
         try:
-            # Prompt'u hazırla
             prompt = self.qa_prompt.format(context=context, question=question)
-            
-            # LLM'den cevap al
             response = self.llm(prompt)
+            
+            latency = time.time() - start_time
+            REQUEST_LATENCY.labels(method="generate", endpoint="llm").observe(latency)
             
             return response.strip()
         except Exception as e:
-            logger.error(f"Cevap oluşturma hatası: {e}")
-            return "Üzgünüm, bir hata oluştu. Lütfen daha sonra tekrar deneyin."
+            logger.error(f"Answer generation error: {e}")
+            return "Sorry, I encountered an error. Please try again later."
     
     def generate_hyde_embedding(self, question: str) -> str:
-        """
-        Hypothetical Document Embedding (HyDE) oluştur
-        
-        Args:
-            question: Soru metni
-            
-        Returns:
-            str: HyDE dokümanı
-        """
+        """HyDE generation with metrics"""
+        LLM_CALLS.inc()
         try:
             prompt = self.hyde_prompt.format(question=question)
             hyde_doc = self.llm(prompt)
             return hyde_doc.strip()
         except Exception as e:
-            logger.error(f"HyDE oluşturma hatası: {e}")
-            return question  # Fallback olarak orijinal soruyu döndür
+            logger.error(f"HyDE generation error: {e}")
+            return question
+    
+    def generate_analysis(self, context: str) -> str:
+        """Advanced analytical response"""
+        LLM_CALLS.inc()
+        try:
+            prompt = self.analytical_prompt.format(context=context)
+            analysis = self.llm(prompt)
+            return analysis.strip()
+        except Exception as e:
+            logger.error(f"Analysis generation error: {e}")
+            return "Analysis unavailable at this time."
+
+class AgenticFramework:
+    """Agentic framework for complex queries"""
+    
+    def __init__(self, llm_service: LLMService, vector_db: VectorDatabase):
+        self.llm_service = llm_service
+        self.vector_db = vector_db
+        
+        # Define tools for the agent
+        self.tools = [
+            Tool(
+                name="General Knowledge",
+                func=self.get_general_knowledge,
+                description="Useful for general questions about NTT DATA sustainability"
+            ),
+            Tool(
+                name="Detailed Analysis",
+                func=self.get_detailed_analysis,
+                description="Useful when asked for in-depth analysis or comparisons"
+            ),
+            Tool(
+                name="Year-Specific Query",
+                func=self.get_year_specific_info,
+                description="Useful when asked about specific years or time periods"
+            ),
+            Tool(
+                name="Metric Lookup",
+                func=self.get_specific_metric,
+                description="Useful when asked for specific metrics or numbers"
+            )
+        ]
+        
+        # Initialize agent
+        self.memory = ConversationBufferMemory(memory_key="chat_history")
+        self.agent = initialize_agent(
+            tools=self.tools,
+            llm=self.llm_service.llm,
+            agent="zero-shot-react-description",
+            memory=self.memory,
+            verbose=True
+        )
+        
+        logger.info("Agentic framework initialized")
+    
+    def get_general_knowledge(self, query: str) -> str:
+        """General knowledge retrieval"""
+        results = self.vector_db.query(query)
+        if not results:
+            return "No information found"
+        
+        context = "\n".join([r["text"] for r in results])
+        return self.llm_service.generate_answer(context, query)
+    
+    def get_detailed_analysis(self, query: str) -> str:
+        """Detailed analysis generation"""
+        results = self.vector_db.query(query, top_k=10)
+        if not results:
+            return "No data available for analysis"
+        
+        context = "\n".join([r["text"] for r in results])
+        return self.llm_service.generate_analysis(context)
+    
+    def get_year_specific_info(self, query: str) -> str:
+        """Year-specific information retrieval"""
+        # Extract year from query
+        year_match = re.search(r"\b(20\d{2})\b", query)
+        if not year_match:
+            return "Please specify a year for this query"
+        
+        year = year_match.group()
+        results = self.vector_db.query(query)
+        
+        # Filter by year
+        year_results = [r for r in results if str(r["metadata"].get("year", "")) == year]
+        if not year_results:
+            return f"No information found for year {year}"
+        
+        context = "\n".join([r["text"] for r in year_results])
+        return self.llm_service.generate_answer(context, query)
+    
+    def get_specific_metric(self, query: str) -> str:
+        """Specific metric retrieval"""
+        results = self.vector_db.query(query)
+        if not results:
+            return "No metrics found"
+        
+        # Look for numbers in results
+        metric_results = []
+        for r in results:
+            numbers = re.findall(r"\d+\.?\d*", r["text"])
+            if numbers:
+                metric_results.append(f"{r['metadata']['source']}: {', '.join(numbers)}")
+        
+        if not metric_results:
+            return "No specific metrics found"
+        
+        return "Found these metrics:\n" + "\n".join(metric_results)
+    
+    def run_agent(self, query: str) -> str:
+        """Run agent with monitoring"""
+        start_time = time.time()
+        try:
+            response = self.agent.run(query)
+            
+            latency = time.time() - start_time
+            REQUEST_LATENCY.labels(method="agent", endpoint="query").observe(latency)
+            
+            return response
+        except Exception as e:
+            logger.error(f"Agent error: {e}")
+            return "The agent encountered an error processing your request."
 
 class RAGPipeline:
-    """RAG pipeline'ını yöneten sınıf"""
+    """Enhanced RAG pipeline with agentic framework"""
     
     def __init__(self):
         self.vector_db = VectorDatabase()
         self.llm_service = LLMService()
+        self.agentic_framework = AgenticFramework(self.llm_service, self.vector_db)
         
-        # BM25 retriever için belgeleri sakla
+        # Initialize BM25 retriever
         self.bm25_documents = []
         self.bm25_retriever = None
         
-        logger.info("RAG pipeline başlatıldı")
+        logger.info("Enhanced RAG pipeline initialized")
     
     async def initialize_bm25_retriever(self):
-        """BM25 retriever'ı başlat (asenkron)"""
+        """Initialize BM25 retriever asynchronously"""
         try:
-            # Vektör veritabanındaki tüm belgeleri al
             all_docs = self.vector_db.collection.get(include=["documents", "metadatas"])
             texts = all_docs["documents"]
             metadatas = all_docs["metadatas"]
             
-            # BM25 için belgeleri hazırla
             self.bm25_documents = [
                 {"text": text, "metadata": meta} 
                 for text, meta in zip(texts, metadatas)
             ]
             
-            # BM25 retriever'ı oluştur
             if self.bm25_documents:
                 texts_only = [doc["text"] for doc in self.bm25_documents]
                 self.bm25_retriever = BM25Retriever.from_texts(
@@ -488,80 +640,59 @@ class RAGPipeline:
                 )
                 self.bm25_retriever.k = Config.TOP_K_RETRIEVAL
                 
-                logger.info("BM25 retriever başlatıldı")
+                logger.info("BM25 retriever initialized")
         except Exception as e:
-            logger.error(f"BM25 retriever başlatma hatası: {e}")
+            logger.error(f"BM25 initialization error: {e}")
     
     async def retrieve_documents(self, question: str) -> List[Dict[str, Any]]:
-        """
-        Belge alımı yap (gelişmiş RAG teknikleri ile)
+        """Enhanced document retrieval with multiple strategies"""
+        retrieval_methods = []
         
-        Args:
-            question: Soru metni
-            
-        Returns:
-            List[Dict[str, Any]]: Alınan belgeler
-        """
-        try:
-            retrieval_methods = []
-            
-            # 1. Temel vektör benzerliği
-            vector_results = self.vector_db.query(question)
-            retrieval_methods.append(("vector", vector_results))
-            
-            # 2. HyDE (Hypothetical Document Embeddings)
-            if Config.ENABLE_HYDE:
-                hyde_doc = self.llm_service.generate_hyde_embedding(question)
-                hyde_results = self.vector_db.query(hyde_doc)
-                retrieval_methods.append(("hyde", hyde_results))
-            
-            # 3. Multi-query retrieval
-            if Config.ENABLE_MULTI_QUERY and self.bm25_retriever:
-                multi_query_results = await self._multi_query_retrieval(question)
-                retrieval_methods.append(("multi_query", multi_query_results))
-            
-            # 4. BM25 (sparse retrieval)
-            if self.bm25_retriever:
-                bm25_results = self.bm25_retriever.get_relevant_documents(question)
-                formatted_bm25 = [{
-                    "text": doc.page_content,
-                    "metadata": doc.metadata,
-                    "score": 0.8  # BM25 için sabit skor (normalizasyon için)
-                } for doc in bm25_results]
-                retrieval_methods.append(("bm25", formatted_bm25))
-            
-            # Sonuçları birleştir ve yeniden sırala
-            combined_results = await self._combine_and_rerank(retrieval_methods)
-            
-            # Yüksek puanlı sonuçları filtrele
-            filtered_results = [
-                res for res in combined_results 
-                if res["score"] >= Config.CONFIDENCE_THRESHOLD
-            ]
-            
-            return filtered_results[:Config.TOP_K_RETRIEVAL]
-        except Exception as e:
-            logger.error(f"Belge alım hatası: {e}")
-            return []
+        # 1. Base vector similarity
+        vector_results = self.vector_db.query(question)
+        retrieval_methods.append(("vector", vector_results))
+        
+        # 2. HyDE
+        if Config.ENABLE_HYDE:
+            hyde_doc = self.llm_service.generate_hyde_embedding(question)
+            hyde_results = self.vector_db.query(hyde_doc)
+            retrieval_methods.append(("hyde", hyde_results))
+        
+        # 3. Multi-query
+        if Config.ENABLE_MULTI_QUERY and self.bm25_retriever:
+            multi_query_results = await self._multi_query_retrieval(question)
+            retrieval_methods.append(("multi_query", multi_query_results))
+        
+        # 4. BM25
+        if self.bm25_retriever:
+            bm25_results = self.bm25_retriever.get_relevant_documents(question)
+            formatted_bm25 = [{
+                "text": doc.page_content,
+                "metadata": doc.metadata,
+                "score": 0.8,
+                "method": "bm25"
+            } for doc in bm25_results]
+            retrieval_methods.append(("bm25", formatted_bm25))
+        
+        # Combine and rerank
+        combined_results = await self._combine_and_rerank(retrieval_methods)
+        
+        # Filter by confidence
+        filtered_results = [
+            res for res in combined_results 
+            if res["score"] >= Config.CONFIDENCE_THRESHOLD
+        ]
+        
+        return filtered_results[:Config.TOP_K_RETRIEVAL]
     
     async def _multi_query_retrieval(self, question: str) -> List[Dict[str, Any]]:
-        """
-        Multi-query retrieval uygula
-        
-        Args:
-            question: Orijinal soru
-            
-        Returns:
-            List[Dict[str, Any]]: Alınan belgeler
-        """
+        """Multi-query retrieval with caching"""
         try:
-            # LangChain MultiQueryRetriever'ı kullan
             retriever = MultiQueryRetriever.from_llm(
                 retriever=self.vector_db.collection.as_retriever(),
                 llm=self.llm_service.llm
             )
             
-            # Birden fazla sorgu oluştur ve çalıştır
             sub_questions = retriever.generate_queries(question, 3)
             all_results = []
             
@@ -569,89 +700,81 @@ class RAGPipeline:
                 results = self.vector_db.query(q)
                 all_results.extend(results)
             
-            # Tekilleştir ve sırala
             unique_results = {res["text"]: res for res in all_results}.values()
             sorted_results = sorted(unique_results, key=lambda x: x["score"], reverse=True)
             
             return sorted_results[:Config.TOP_K_RETRIEVAL]
         except Exception as e:
-            logger.error(f"Multi-query retrieval hatası: {e}")
+            logger.error(f"Multi-query error: {e}")
             return []
     
     async def _combine_and_rerank(self, retrieval_methods: List[Tuple[str, List[Dict[str, Any]]]]) -> List[Dict[str, Any]]:
-        """
-        Farklı retrieval yöntemlerinden gelen sonuçları birleştir ve yeniden sırala
+        """Advanced result combination and reranking"""
+        combined = []
         
-        Args:
-            retrieval_methods: (yöntem_adı, sonuçlar) listesi
-            
-        Returns:
-            List[Dict[str, Any]]: Birleştirilmiş ve sıralanmış sonuçlar
-        """
-        try:
-            combined = []
-            
-            # Tüm sonuçları topla
-            for method_name, results in retrieval_methods:
-                for res in results:
-                    # Yönteme göre ağırlıklandırma
-                    weight = 1.0
-                    if method_name == "hyde":
-                        weight = 0.9  # HyDE biraz daha az güvenilir
-                    elif method_name == "bm25":
-                        weight = 0.8  # BM25 daha az güvenilir
-                    elif method_name == "multi_query":
-                        weight = 1.1  # Multi-query daha güvenilir
-                    
-                    combined.append({
-                        "text": res["text"],
-                        "metadata": res["metadata"],
-                        "score": res["score"] * weight,
-                        "method": method_name
-                    })
-            
-            # Tekilleştir
-            unique_results = {}
-            for res in combined:
-                text = res["text"]
-                if text not in unique_results or res["score"] > unique_results[text]["score"]:
-                    unique_results[text] = res
-            
-            # Yeniden sırala
-            sorted_results = sorted(unique_results.values(), key=lambda x: x["score"], reverse=True)
-            
-            return sorted_results
-        except Exception as e:
-            logger.error(f"Sonuç birleştirme hatası: {e}")
-            return []
+        for method_name, results in retrieval_methods:
+            for res in results:
+                weight = 1.0
+                if method_name == "hyde":
+                    weight = 0.9
+                elif method_name == "bm25":
+                    weight = 0.8
+                elif method_name == "multi_query":
+                    weight = 1.1
+                
+                combined.append({
+                    "text": res["text"],
+                    "metadata": res["metadata"],
+                    "score": res["score"] * weight,
+                    "method": method_name
+                })
+        
+        unique_results = {}
+        for res in combined:
+            text = res["text"]
+            if text not in unique_results or res["score"] > unique_results[text]["score"]:
+                unique_results[text] = res
+        
+        # Advanced reranking - boost newer documents
+        current_year = datetime.now().year
+        for res in unique_results.values():
+            year = res["metadata"].get("year")
+            if year and isinstance(year, int):
+                year_diff = current_year - year
+                if year_diff <= 3:  # Boost recent 3 years
+                    res["score"] *= 1 + (3 - year_diff) * 0.1
+        
+        sorted_results = sorted(unique_results.values(), key=lambda x: x["score"], reverse=True)
+        
+        return sorted_results
     
     async def generate_response(self, question: str) -> Dict[str, Any]:
-        """
-        Soruya RAG tabanlı yanıt oluştur
+        """Enhanced response generation with agentic framework"""
+        start_time = time.time()
         
-        Args:
-            question: Soru metni
-            
-        Returns:
-            Dict[str, Any]: Yanıt ve kaynaklar
-        """
         try:
-            # 1. Belge alımı
+            # Use agentic framework for complex queries
+            if Config.ENABLE_AGENT and self._is_complex_query(question):
+                answer = self.agentic_framework.run_agent(question)
+                return {
+                    "answer": answer,
+                    "sources": [{"method": "agentic"}],
+                    "is_agentic": True
+                }
+            
+            # Standard RAG for simple queries
             retrieved_docs = await self.retrieve_documents(question)
             
             if not retrieved_docs:
                 return {
-                    "answer": "İlgili bilgi bulunamadı.",
-                    "sources": []
+                    "answer": "No relevant information found.",
+                    "sources": [],
+                    "is_agentic": False
                 }
             
-            # 2. Bağlam oluştur
             context = "\n\n".join([doc["text"] for doc in retrieved_docs])
-            
-            # 3. LLM ile cevap oluştur
             answer = self.llm_service.generate_answer(context, question)
             
-            # 4. Kaynakları hazırla
             sources = [
                 {
                     "source": doc["metadata"]["source"],
@@ -662,28 +785,98 @@ class RAGPipeline:
                 for doc in retrieved_docs
             ]
             
+            latency = time.time() - start_time
+            REQUEST_LATENCY.labels(method="generate", endpoint="response").observe(latency)
+            REQUEST_COUNT.labels(method="POST", endpoint="/ask", http_status=200).inc()
+            
             return {
                 "answer": answer,
-                "sources": sources
+                "sources": sources,
+                "is_agentic": False
             }
         except Exception as e:
-            logger.error(f"Yanıt oluşturma hatası: {e}")
+            logger.error(f"Response generation error: {e}")
+            REQUEST_COUNT.labels(method="POST", endpoint="/ask", http_status=500).inc()
             return {
-                "answer": "Üzgünüm, bir hata oluştu. Lütfen daha sonra tekrar deneyin.",
-                "sources": []
+                "answer": "Sorry, I encountered an error processing your request.",
+                "sources": [],
+                "is_agentic": False
             }
+    
+    def _is_complex_query(self, question: str) -> bool:
+        """Determine if a query is complex enough for agentic processing"""
+        complexity_keywords = [
+            "compare", "analyze", "trend", "over time", 
+            "difference between", "similarities", "how has", 
+            "evolution of", "progress on"
+        ]
+        
+        question_lower = question.lower()
+        return any(keyword in question_lower for keyword in complexity_keywords)
+
+class GradioInterface:
+    """Gradio web interface for the RAG system"""
+    
+    def __init__(self, rag_pipeline: RAGPipeline):
+        self.rag = rag_pipeline
+        
+        # Create interface
+        self.interface = gr.Interface(
+            fn=self.process_query,
+            inputs=gr.Textbox(lines=2, placeholder="Ask about NTT DATA sustainability..."),
+            outputs=[
+                gr.Markdown(label="Answer"),
+                gr.JSON(label="Sources")
+            ],
+            title="NTT DATA Sustainability Reports Q&A",
+            description="Ask questions about NTT DATA's sustainability initiatives and reports",
+            examples=[
+                ["What are NTT DATA's carbon emission reduction targets?"],
+                ["How has NTT DATA's diversity ratio changed over time?"],
+                ["Compare the sustainability initiatives between 2022 and 2023"]
+            ],
+            allow_flagging="never"
+        )
+        
+        logger.info("Gradio interface initialized")
+    
+    async def process_query(self, question: str):
+        """Process user query for Gradio interface"""
+        response = await self.rag.generate_response(question)
+        
+        # Format sources for display
+        sources = response["sources"]
+        if sources:
+            sources_info = [
+                f"{src['source']} ({src['year']}) - Confidence: {src['score']:.2f}"
+                for src in sources
+            ]
+        else:
+            sources_info = ["No sources referenced"]
+        
+        return response["answer"], {"sources": sources_info}
+    
+    def launch(self):
+        """Launch the Gradio interface"""
+        self.interface.launch(
+            server_name="0.0.0.0",
+            server_port=Config.GRADIO_PORT,
+            share=False
+        )
 
 class APIService:
-    """FastAPI servisini yöneten sınıf"""
+    """Enhanced FastAPI service with monitoring"""
     
     def __init__(self):
         self.app = FastAPI(
-            title="NTT DATA Sürdürülebilirlik Raporları API",
-            description="NTT DATA'nın sürdürülebilirlik raporları üzerinde RAG tabanlı sorgulama yapar.",
-            version="1.0.0"
+            title="NTT DATA Sustainability Reports API",
+            description="Enhanced API for querying NTT DATA sustainability reports with RAG",
+            version="2.0.0",
+            docs_url="/api/docs",
+            redoc_url="/api/redoc"
         )
         
-        # CORS ayarları
+        # Add middleware
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -692,143 +885,207 @@ class APIService:
             allow_headers=["*"],
         )
         
-        # RAG pipeline'ı
+        # Initialize services
         self.rag_pipeline = RAGPipeline()
         
-        # API endpoint'lerini tanımla
+        # Setup routes
         self._setup_routes()
         
-        # Başlangıçta BM25 retriever'ı başlat
+        # Initialize monitoring
+        if Config.ENABLE_MONITORING:
+            Instrumentator().instrument(self.app).expose(self.app)
+            start_http_server(Config.METRICS_PORT)
+        
+        # Initialize BM25 retriever
         asyncio.create_task(self.rag_pipeline.initialize_bm25_retriever())
         
-        logger.info("API servisi başlatıldı")
+        # Serve static files
+        self.app.mount("/static", StaticFiles(directory=Config.STATIC_DIR), name="static")
+        
+        logger.info("API service initialized with monitoring")
     
     def _setup_routes(self):
-        """API endpoint'lerini tanımla"""
+        """Define API routes"""
         
-        # Pydantic modelleri
+        # Pydantic models
         class QuestionRequest(BaseModel):
-            question: str = Field(..., description="Sorulacak soru")
+            question: str = Field(..., example="What are NTT DATA's sustainability goals?")
+            use_agent: Optional[bool] = Field(False, description="Use agentic framework")
         
         class AnswerResponse(BaseModel):
-            answer: str = Field(..., description="Oluşturulan cevap")
+            answer: str = Field(..., example="NTT DATA aims to achieve net-zero emissions by 2030...")
             sources: List[Dict[str, Any]] = Field(
-                ..., 
-                description="Cevabın kaynakları ve metadata bilgileri"
+                ...,
+                example=[{"source": "report_2023.pdf", "year": 2023, "score": 0.95}]
             )
+            is_agentic: bool = Field(False, description="Was agentic framework used?")
+            processing_time: Optional[float] = Field(None, description="Response time in seconds")
         
         class HealthResponse(BaseModel):
-            status: str = Field(..., description="Servis durumu")
-            vector_db_count: int = Field(..., description="Vektör veritabanındaki belge sayısı")
-            last_updated: Optional[str] = Field(None, description="Son güncelleme zamanı")
+            status: str = Field(..., example="healthy")
+            vector_db_count: int = Field(..., example=150)
+            last_updated: Optional[str] = Field(None, example="2023-10-15T12:00:00Z")
+            cache_hit_ratio: Optional[float] = Field(None, example=0.75)
         
-        # Endpoint'ler
-        @self.app.post("/ask", response_model=AnswerResponse)
-        async def ask_question(request: QuestionRequest):
-            """Soruya cevap ver"""
+        class IngestResponse(BaseModel):
+            status: str = Field(..., example="success")
+            documents_added: int = Field(..., example=5)
+            processing_time: float = Field(..., example=12.5)
+        
+        # Endpoints
+        @self.app.post("/api/ask", response_model=AnswerResponse)
+        async def ask_question(request: Request, question_request: QuestionRequest):
+            start_time = time.time()
+            
             try:
-                response = await self.rag_pipeline.generate_response(request.question)
+                # Override agentic behavior if requested
+                original_setting = Config.ENABLE_AGENT
+                if question_request.use_agent:
+                    Config.ENABLE_AGENT = True
+                
+                response = await self.rag_pipeline.generate_response(question_request.question)
+                response["processing_time"] = time.time() - start_time
+                
+                # Restore original setting
+                Config.ENABLE_AGENT = original_setting
+                
                 return response
             except Exception as e:
-                logger.error(f"API hatası: {e}")
+                logger.error(f"API error: {e}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Internal server error"
+                    detail=str(e)
                 )
         
-        @self.app.get("/health", response_model=HealthResponse)
+        @self.app.get("/api/health", response_model=HealthResponse)
         async def health_check():
-            """Servis sağlık durumunu kontrol et"""
             try:
-                # Vektör veritabanı istatistikleri
                 count = self.rag_pipeline.vector_db.collection.count()
                 
-                # Son güncelleme zamanı
                 last_update = None
                 if count > 0:
                     items = self.rag_pipeline.vector_db.collection.get(limit=1)
                     if items["metadatas"]:
                         last_update = items["metadatas"][0].get("processed_at")
                 
+                # Calculate cache hit ratio (simplified)
+                cache_info = self.rag_pipeline.llm_service.generate_answer.cache_info()
+                if cache_info.hits + cache_info.misses > 0:
+                    ratio = cache_info.hits / (cache_info.hits + cache_info.misses)
+                    CACHE_HIT_RATIO.set(ratio)
+                else:
+                    ratio = 0.0
+                
                 return {
                     "status": "healthy",
                     "vector_db_count": count,
-                    "last_updated": last_update
+                    "last_updated": last_update,
+                    "cache_hit_ratio": ratio
                 }
             except Exception as e:
-                logger.error(f"Health check hatası: {e}")
+                logger.error(f"Health check error: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service unavailable"
+                )
+        
+        @self.app.post("/api/ingest", response_model=IngestResponse)
+        async def ingest_reports():
+            start_time = time.time()
+            
+            try:
+                success = DataIngestion.download_and_process_reports()
+                if not success:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Report ingestion failed"
+                    )
+                
+                # Get count of documents
+                count = self.rag_pipeline.vector_db.collection.count()
+                
+                return {
+                    "status": "success",
+                    "documents_added": count,
+                    "processing_time": time.time() - start_time
+                }
+            except Exception as e:
+                logger.error(f"Ingestion error: {e}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Health check failed"
+                    detail=str(e)
                 )
+        
+        @self.app.exception_handler(HTTPException)
+        async def http_exception_handler(request: Request, exc: HTTPException):
+            REQUEST_COUNT.labels(
+                method=request.method,
+                endpoint=request.url.path,
+                http_status=exc.status_code
+            ).inc()
+            
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
 
 class DataIngestion:
-    """Veri yükleme işlemlerini yöneten sınıf"""
+    """Enhanced data ingestion with GCP support"""
     
     @staticmethod
     def get_report_urls() -> List[Dict[str, str]]:
-        """
-        NTT DATA sürdürülebilirlik raporu URL'lerini al
-        
-        Returns:
-            List[Dict[str, str]]: Rapor URL'leri ve metadata
-        """
-        # Örnek URL'ler - gerçek uygulamada web scraping yapılabilir
+        """Get report URLs with enhanced metadata"""
         return [
             {
                 "url": "https://www.nttdata.com/global/en/-/media/nttdataglobal/1_files/sustainability/susatainability-report/2023/sr2023.pdf?rev=ae0d7ce3fce24daaae3616c47030b761",
                 "year": 2023,
-                "title": "NTT DATA Sustainability Report 2023"
+                "title": "NTT DATA Sustainability Report 2023",
+                "type": "full_report"
             },
             {
                 "url": "https://www.nttdata.com/global/en/-/media/nttdataglobal/1_files/sustainability/susatainability-report/2022/sr_2022.pdf?rev=d67a7088abe84e03af49b8f47d3cd31f",
                 "year": 2022,
-                "title": "NTT DATA Sustainability Report 2022"
+                "title": "NTT DATA Sustainability Report 2022",
+                "type": "full_report"
             },
             {
                 "url": "https://www.nttdata.com/global/en/-/media/nttdataglobal/1_files/sustainability/susatainability-report/2021/sr_2021.pdf?rev=aea7ae087b93439ea593a26c842b39dc",
                 "year": 2021,
-                "title": "NTT DATA Sustainability Report 2021"
+                "title": "NTT DATA Sustainability Report 2021",
+                "type": "full_report"
             },
             {
                 "url": "https://www.nttdata.com/global/en/-/media/nttdataglobal/1_files/sustainability/susatainability-report/2020/sr_2020.pdf?rev=4e3d9921539d48ee8bb109d5b4110dc5",
                 "year": 2020,
-                "title": "NTT DATA Sustainability Report 2020"
+                "title": "NTT DATA Sustainability Report 2020",
+                "type": "full_report"
             },
             {
                 "url": "https://www.nttdata.com/global/en/-/media/nttdataglobal/1_files/sustainability/susatainability-report/2019/sr_2019_p.pdf?rev=b4626c134ef348dd92a90ae9eb19249c",
                 "year": 2019,
-                "title": "NTT DATA Sustainability Report 2019"
+                "title": "NTT DATA Sustainability Report 2019",
+                "type": "full_report"
             }
         ]
     
     @staticmethod
     def download_and_process_reports() -> bool:
-        """
-        Tüm raporları indir ve işle
-        
-        Returns:
-            bool: İşlem başarılıysa True, değilse False
-        """
+        """Enhanced report processing with parallelization"""
         try:
             report_urls = DataIngestion.get_report_urls()
             vector_db = VectorDatabase()
             
-            # Paralel indirme ve işleme
-            with ThreadPoolExecutor() as executor:
+            with ThreadPoolExecutor(max_workers=Config.MAX_CONCURRENT_WORKERS) as executor:
                 futures = []
                 
                 for report in report_urls:
-                    # PDF dosya adını oluştur
                     filename = f"ntt_sustainability_{report['year']}.pdf"
                     save_path = Config.PDF_STORAGE_DIR / filename
                     
-                    # Eğer dosya zaten varsa atla
                     if save_path.exists():
-                        logger.info(f"{filename} zaten var, atlanıyor")
+                        logger.info(f"Skipping existing file: {filename}")
                         continue
                     
-                    # İndirme işlemini başlat
                     futures.append(executor.submit(
                         DataIngestion._download_and_process_single_report,
                         report["url"],
@@ -836,117 +1093,147 @@ class DataIngestion:
                         vector_db
                     ))
                 
-                # Sonuçları bekle
                 results = [f.result() for f in futures]
                 
             return all(results)
         except Exception as e:
-            logger.error(f"Rapor işleme hatası: {e}")
+            logger.error(f"Report processing error: {e}")
             return False
     
     @staticmethod
     def _download_and_process_single_report(url: str, save_path: Path, vector_db: VectorDatabase) -> bool:
-        """
-        Tek bir raporu indir ve işle
+        """Single report processing with retry logic"""
+        max_retries = 3
+        retry_count = 0
         
-        Args:
-            url: Rapor URL'si
-            save_path: Kaydedilecek dosya yolu
-            vector_db: Vektör veritabanı instance'ı
-            
-        Returns:
-            bool: İşlem başarılıysa True, değilse False
-        """
-        try:
-            # PDF'i indir
-            if not DocumentProcessor.download_pdf(url, save_path):
-                return False
-            
-            # PDF'i işle
-            processed_chunks = DocumentProcessor.process_pdf(save_path)
-            if not processed_chunks:
-                return False
+        while retry_count < max_retries:
+            try:
+                # Download PDF
+                if not DocumentProcessor.download_pdf(url, str(save_path)):
+                    raise Exception("PDF download failed")
                 
-            # Vektör veritabanına ekle
-            return vector_db.add_documents(processed_chunks)
-        except Exception as e:
-            logger.error(f"Tek rapor işleme hatası: {e}")
-            return False
+                # Process PDF
+                processed_chunks = DocumentProcessor.process_pdf(save_path)
+                if not processed_chunks:
+                    raise Exception("No chunks processed")
+                    
+                # Add to vector DB
+                if not vector_db.add_documents(processed_chunks):
+                    raise Exception("Vector DB addition failed")
+                
+                return True
+            except Exception as e:
+                retry_count += 1
+                logger.warning(f"Attempt {retry_count} failed: {e}")
+                time.sleep(2 ** retry_count)  # Exponential backoff
+        
+        logger.error(f"Failed after {max_retries} attempts for {url}")
+        return False
 
 class GCPIntegration:
-    """GCP entegrasyon işlemleri"""
+    """Enhanced GCP integration with Vertex AI support"""
     
     @staticmethod
     def upload_to_gcs(local_path: Path, gcs_path: str) -> bool:
-        """
-        Dosyayı Google Cloud Storage'a yükle
+        """Upload file to GCS with retry logic"""
+        max_retries = 3
+        retry_count = 0
         
-        Args:
-            local_path: Yerel dosya yolu
-            gcs_path: GCS hedef yolu
-            
-        Returns:
-            bool: Yükleme başarılıysa True, değilse False
-        """
-        try:
-            if not Config.GCP_BUCKET_NAME:
-                logger.warning("GCP_BUCKET_NAME ayarlanmamış, atlanıyor")
-                return False
+        while retry_count < max_retries:
+            try:
+                client = storage.Client()
+                bucket = client.bucket(Config.GCP_BUCKET_NAME)
+                blob = bucket.blob(gcs_path)
                 
-            client = storage.Client()
-            bucket = client.bucket(Config.GCP_BUCKET_NAME)
-            blob = bucket.blob(gcs_path)
-            
-            blob.upload_from_filename(str(local_path))
-            
-            logger.info(f"{local_path} başarıyla GCS'ye yüklendi: gs://{Config.GCP_BUCKET_NAME}/{gcs_path}")
-            return True
-        except Exception as e:
-            logger.error(f"GCS yükleme hatası: {e}")
-            return False
+                blob.upload_from_filename(str(local_path))
+                
+                logger.info(f"Uploaded to GCS: gs://{Config.GCP_BUCKET_NAME}/{gcs_path}")
+                return True
+            except Exception as e:
+                retry_count += 1
+                logger.warning(f"Upload attempt {retry_count} failed: {e}")
+                time.sleep(2 ** retry_count)
+        
+        logger.error(f"Failed to upload after {max_retries} attempts")
+        return False
     
     @staticmethod
     def backup_vector_db() -> bool:
-        """
-        Vektör veritabanını GCS'ye yedekle
-        
-        Returns:
-            bool: Yedekleme başarılıysa True, değilse False
-        """
+        """Backup vector database to GCS"""
         try:
             if not Config.GCP_BUCKET_NAME:
                 return False
                 
-            # Vektör veritabanı dosyalarını bul
-            db_files = list(Config.VECTOR_DB_DIR.glob("*"))
-            if not db_files:
-                return False
+            # Create temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
                 
-            # Her dosyayı yükle
-            success = True
-            for db_file in db_files:
-                gcs_path = f"vector_db/{db_file.name}"
-                if not GCPIntegration.upload_to_gcs(db_file, gcs_path):
-                    success = False
-                    
-            return success
+                # Copy vector DB files
+                for db_file in Config.VECTOR_DB_DIR.glob("*"):
+                    shutil.copy(db_file, temp_path / db_file.name)
+                
+                # Create timestamped archive
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_name = f"vector_db_backup_{timestamp}.tar.gz"
+                archive_path = Config.PROCESSED_DIR / archive_name
+                
+                # Create tar.gz
+                shutil.make_archive(
+                    str(archive_path.with_suffix("")),
+                    "gztar",
+                    root_dir=temp_dir
+                )
+                
+                # Upload to GCS
+                gcs_path = f"backups/{archive_name}"
+                return GCPIntegration.upload_to_gcs(archive_path, gcs_path)
         except Exception as e:
-            logger.error(f"Vektör DB yedekleme hatası: {e}")
+            logger.error(f"Vector DB backup error: {e}")
+            return False
+    
+    @staticmethod
+    def deploy_to_vertex_ai():
+        """Deploy the service to Vertex AI"""
+        try:
+            if not all([Config.GCP_PROJECT_ID, Config.GCP_REGION]):
+                raise ValueError("GCP project ID and region must be configured")
+            
+            aiplatform.init(
+                project=Config.GCP_PROJECT_ID,
+                location=Config.GCP_REGION
+            )
+            
+            # Create Docker container and push to GCR
+            # (Implementation depends on your Docker setup)
+            
+            # Define deployment
+            endpoint = aiplatform.Endpoint.create(
+                display_name="ntt-sustainability-rag"
+            )
+            
+            # Deploy model
+            # (This is a simplified example - actual deployment would need model artifacts)
+            endpoint.deploy(
+                model=None,  # You would typically deploy a trained model here
+                deployed_model_display_name="rag-service",
+                traffic_percentage=100,
+                machine_type="n1-standard-4",
+                min_replica_count=1,
+                max_replica_count=3
+            )
+            
+            logger.info(f"Service deployed to Vertex AI endpoint: {endpoint.resource_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Vertex AI deployment error: {e}")
             return False
 
 class Monitoring:
-    """Sistem izleme ve metrikler"""
+    """Enhanced monitoring with Prometheus and logging"""
     
     @staticmethod
     def log_metrics(question: str, response: Dict[str, Any], response_time: float):
-        """
-        Sorgu metriklerini logla
-        
-        Args:
-            question: Sorulan soru
-            response: Alınan yanıt
-            response_time: Yanıt süresi (saniye)
-        """
+        """Log detailed metrics"""
         try:
             metrics = {
                 "timestamp": datetime.now().isoformat(),
@@ -960,46 +1247,178 @@ class Monitoring:
                 ),
                 "retrieval_methods": ",".join(
                     set(s.get("method", "vector") for s in response.get("sources", []))
+                ),
+                "is_agentic": response.get("is_agentic", False),
+                "cache_hit": response.get("cache_hit", False)
             }
             
-            # Log dosyasına yaz
+            # Log to file
             metrics_file = Config.PROCESSED_DIR / "metrics.log"
             with open(metrics_file, "a") as f:
                 f.write(json.dumps(metrics) + "\n")
-                
-            # GCS'ye yedekle
+            
+            # Upload to GCS daily
             if Config.GCP_BUCKET_NAME:
-                GCPIntegration.upload_to_gcs(
-                    metrics_file,
-                    f"metrics/metrics_{datetime.now().date()}.log"
-                )
+                daily_file = f"metrics/{datetime.now().date()}_metrics.log"
+                GCPIntegration.upload_to_gcs(metrics_file, daily_file)
         except Exception as e:
-            logger.error(f"Metrik loglama hatası: {e}")
+            logger.error(f"Metrics logging error: {e}")
+
+# Test suite
+class TestRAGSystem:
+    """Comprehensive test suite for the RAG system"""
+    
+    @pytest.fixture
+    def rag_pipeline(self):
+        """Fixture for RAG pipeline"""
+        pipeline = RAGPipeline()
+        yield pipeline
+    
+    @pytest.fixture
+    def test_document(self):
+        """Fixture for test document"""
+        return {
+            "id": "test_chunk_1",
+            "text": "NTT DATA aims to reduce carbon emissions by 50% by 2030.",
+            "metadata": {
+                "source": "test_report.pdf",
+                "year": 2023,
+                "processed_at": datetime.now().isoformat()
+            }
+        }
+    
+    @patch('requests.get')
+    def test_pdf_download(self, mock_get):
+        """Test PDF downloading"""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.content = b"test content"
+        
+        temp_file = Config.PDF_STORAGE_DIR / "test_download.pdf"
+        success = DocumentProcessor.download_pdf("https://www.nttdata.com/global/en/-/media/nttdataglobal/files/sustainability/susatainability-report/sustainability-report_2017_1.pdf?rev=29bdd65074874eddb3fcea68a399687f", str(temp_file))
+        
+        assert success
+        assert temp_file.exists()
+        temp_file.unlink()
+    
+    def test_text_extraction(self, tmp_path):
+        """Test text extraction from PDF"""
+        test_pdf = tmp_path / "test.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((100, 100), "Test content")
+        doc.save(test_pdf)
+        doc.close()
+        
+        text = DocumentProcessor.extract_text_from_pdf(str(test_pdf))
+        assert "Test content" in text
+    
+    def test_text_cleaning(self):
+        """Test text cleaning"""
+        dirty_text = "  NTT DATA's   sustainability report (2023)!!!  "
+        clean_text = DocumentProcessor.clean_text(dirty_text)
+        assert "sustainability report 2023" in clean_text
+    
+    def test_chunking(self):
+        """Test text chunking"""
+        long_text = " ".join(["Sentence"] * 500)
+        chunks = DocumentProcessor.chunk_text(long_text)
+        assert len(chunks) > 1
+        assert all(len(chunk) <= Config.CHUNK_SIZE + 100 for chunk in chunks)
+    
+    def test_vector_db_add(self, rag_pipeline, test_document):
+        """Test adding documents to vector DB"""
+        # Skip this test as it requires ChromaDB setup
+        pytest.skip("Skipping ChromaDB test in CI environment")
+    
+    @patch('langchain_community.llms.Ollama.__call__')
+    def test_llm_response(self, mock_llm):
+        """Test LLM response generation"""
+        mock_llm.return_value = "Test response"
+        
+        llm_service = LLMService()
+        context = "Test context"
+        question = "Test question"
+        response = llm_service.generate_answer(context, question)
+        
+        assert response == "Test response"
+    
+    @patch.object(RAGPipeline, 'retrieve_documents')
+    @pytest.mark.asyncio
+    async def test_rag_response(self, mock_retrieve):
+        """Test RAG response generation"""
+        mock_retrieve.return_value = [{
+            "text": "Test document content",
+            "metadata": {"source": "test.pdf", "year": 2023},
+            "score": 0.9
+        }]
+        
+        rag_pipeline = RAGPipeline()
+        response = await rag_pipeline.generate_response("Test question")
+        
+        assert "answer" in response
+        assert "sources" in response
+    
+    def test_agentic_framework(self):
+        """Test agentic framework initialization"""
+        llm_service = LLMService()
+        # Skip ChromaDB initialization for this test
+        with patch('main.VectorDatabase'):
+            agent = AgenticFramework(llm_service, MagicMock())
+            assert len(agent.tools) > 0
+            assert hasattr(agent, "run_agent")
+
+def run_tests():
+    """Run the test suite"""
+    import pytest
+    pytest.main(["-v", "-s", "--cov=.", "--cov-report=html"])
 
 def main():
-    """Uygulama ana fonksiyonu"""
+    """Enhanced main function with multiple service options"""
     try:
-        # Veri yükleme işlemini başlat
-        logger.info("Raporlar indiriliyor ve işleniyor...")
+        # Initialize services
+        logger.info("Initializing services...")
+        
+        # Data ingestion
+        logger.info("Downloading and processing reports...")
         DataIngestion.download_and_process_reports()
         
-        # GCS yedekleme
+        # GCP backup
         if Config.GCP_BUCKET_NAME:
-            logger.info("Vektör veritabanı GCS'ye yedekleniyor...")
+            logger.info("Backing up to GCS...")
             GCPIntegration.backup_vector_db()
         
-        # API servisini başlat
-        api_service = APIService()
+        # Choose service to run
+        service_option = os.getenv("SERVICE_OPTION", "api")  # api, gradio, or deploy
         
-        logger.info(f"API servisi başlatılıyor: http://{Config.FASTAPI_HOST}:{Config.FASTAPI_PORT}")
-        uvicorn.run(
-            api_service.app,
-            host=Config.FASTAPI_HOST,
-            port=Config.FASTAPI_PORT,
-            log_level="info"
-        )
+        if service_option == "api":
+            # Start API service
+            api_service = APIService()
+            logger.info(f"Starting API service on http://{Config.FASTAPI_HOST}:{Config.FASTAPI_PORT}")
+            uvicorn.run(
+                api_service.app,
+                host=Config.FASTAPI_HOST,
+                port=Config.FASTAPI_PORT,
+                log_level="info"
+            )
+        elif service_option == "gradio":
+            # Start Gradio interface
+            rag_pipeline = RAGPipeline()
+            gradio_interface = GradioInterface(rag_pipeline)
+            logger.info(f"Starting Gradio interface on port {Config.GRADIO_PORT}")
+            gradio_interface.launch()
+        elif service_option == "deploy":
+            # Deploy to Vertex AI
+            logger.info("Deploying to Vertex AI...")
+            GCPIntegration.deploy_to_vertex_ai()
+        elif service_option == "test":
+            # Run tests
+            logger.info("Running tests...")
+            run_tests()
+        else:
+            raise ValueError(f"Unknown service option: {service_option}")
+            
     except Exception as e:
-        logger.error(f"Uygulama hatası: {e}")
+        logger.error(f"Application error: {e}")
         raise
 
 if __name__ == "__main__":
