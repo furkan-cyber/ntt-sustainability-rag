@@ -1,5 +1,4 @@
 # Core Dependencies
-#python>=3.9
 fastapi>=0.95.0
 uvicorn>=0.21.1
 pydantic>=1.10.7
@@ -25,10 +24,6 @@ ollama>=0.0.6
 
 # Web Interface
 gradio>=3.34.0
-
-# GCP Integration
-google-cloud-storage>=2.8.0
-google-cloud-aiplatform>=1.25.0
 
 # Monitoring
 prometheus-client>=0.16.0
