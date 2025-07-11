@@ -818,7 +818,7 @@ For support and questions:
 
 - **GitHub Issues**: [Create an issue](https://github.com/furkan-cyber/ntt-sustainability-rag/issues)
 - **Documentation**: [Wiki](https://github.com/furkan-cyber/ntt-sustainability-rag/wiki)
-- **Email**: furkanavcioglu11@gmail.com
+- **Email**: furkanavcioglu.11@gmail.com
 - **Discord**: [Join our community](https://discord.gg/example)
 
 ---
