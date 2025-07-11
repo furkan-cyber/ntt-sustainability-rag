@@ -12,7 +12,6 @@ services:
       - ./data:/app/data
       - ./static:/app/static
       - ./.env:/app/.env
-      - ./service-account.json:/app/service-account.json
     environment:
       - SERVICE_OPTION=${SERVICE_OPTION:-api}
     restart: unless-stopped
