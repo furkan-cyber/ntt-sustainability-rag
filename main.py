@@ -78,7 +78,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # Configuration
 from dotenv import load_dotenv
 
-
+# GCP integration
+from google.cloud import storage
+from google.cloud import aiplatform
 
 # Testing
 import pytest
@@ -145,7 +147,10 @@ class Config:
     GRADIO_PORT = 7860
     METRICS_PORT = 8001
     
-   
+    # GCP configurations
+    GCP_BUCKET_NAME = os.getenv("GCP_BUCKET_NAME", "")
+    GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
+    GCP_REGION = os.getenv("GCP_REGION", "us-central1")
     
     # Feature flags
     ENABLE_HYDE = True
@@ -1125,7 +1130,103 @@ class DataIngestion:
         logger.error(f"Failed after {max_retries} attempts for {url}")
         return False
 
-
+class GCPIntegration:
+    """Enhanced GCP integration with Vertex AI support"""
+    
+    @staticmethod
+    def upload_to_gcs(local_path: Path, gcs_path: str) -> bool:
+        """Upload file to GCS with retry logic"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                client = storage.Client()
+                bucket = client.bucket(Config.GCP_BUCKET_NAME)
+                blob = bucket.blob(gcs_path)
+                
+                blob.upload_from_filename(str(local_path))
+                
+                logger.info(f"Uploaded to GCS: gs://{Config.GCP_BUCKET_NAME}/{gcs_path}")
+                return True
+            except Exception as e:
+                retry_count += 1
+                logger.warning(f"Upload attempt {retry_count} failed: {e}")
+                time.sleep(2 ** retry_count)
+        
+        logger.error(f"Failed to upload after {max_retries} attempts")
+        return False
+    
+    @staticmethod
+    def backup_vector_db() -> bool:
+        """Backup vector database to GCS"""
+        try:
+            if not Config.GCP_BUCKET_NAME:
+                return False
+                
+            # Create temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                # Copy vector DB files
+                for db_file in Config.VECTOR_DB_DIR.glob("*"):
+                    shutil.copy(db_file, temp_path / db_file.name)
+                
+                # Create timestamped archive
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_name = f"vector_db_backup_{timestamp}.tar.gz"
+                archive_path = Config.PROCESSED_DIR / archive_name
+                
+                # Create tar.gz
+                shutil.make_archive(
+                    str(archive_path.with_suffix("")),
+                    "gztar",
+                    root_dir=temp_dir
+                )
+                
+                # Upload to GCS
+                gcs_path = f"backups/{archive_name}"
+                return GCPIntegration.upload_to_gcs(archive_path, gcs_path)
+        except Exception as e:
+            logger.error(f"Vector DB backup error: {e}")
+            return False
+    
+    @staticmethod
+    def deploy_to_vertex_ai():
+        """Deploy the service to Vertex AI"""
+        try:
+            if not all([Config.GCP_PROJECT_ID, Config.GCP_REGION]):
+                raise ValueError("GCP project ID and region must be configured")
+            
+            aiplatform.init(
+                project=Config.GCP_PROJECT_ID,
+                location=Config.GCP_REGION
+            )
+            
+            # Create Docker container and push to GCR
+            # (Implementation depends on your Docker setup)
+            
+            # Define deployment
+            endpoint = aiplatform.Endpoint.create(
+                display_name="ntt-sustainability-rag"
+            )
+            
+            # Deploy model
+            # (This is a simplified example - actual deployment would need model artifacts)
+            endpoint.deploy(
+                model=None,  # You would typically deploy a trained model here
+                deployed_model_display_name="rag-service",
+                traffic_percentage=100,
+                machine_type="n1-standard-4",
+                min_replica_count=1,
+                max_replica_count=3
+            )
+            
+            logger.info(f"Service deployed to Vertex AI endpoint: {endpoint.resource_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Vertex AI deployment error: {e}")
+            return False
 
 class Monitoring:
     """Enhanced monitoring with Prometheus and logging"""
@@ -1281,7 +1382,10 @@ def main():
         logger.info("Downloading and processing reports...")
         DataIngestion.download_and_process_reports()
         
-        
+        # GCP backup
+        if Config.GCP_BUCKET_NAME:
+            logger.info("Backing up to GCS...")
+            GCPIntegration.backup_vector_db()
         
         # Choose service to run
         service_option = os.getenv("SERVICE_OPTION", "api")  # api, gradio, or deploy
@@ -1302,7 +1406,10 @@ def main():
             gradio_interface = GradioInterface(rag_pipeline)
             logger.info(f"Starting Gradio interface on port {Config.GRADIO_PORT}")
             gradio_interface.launch()
-        
+        elif service_option == "deploy":
+            # Deploy to Vertex AI
+            logger.info("Deploying to Vertex AI...")
+            GCPIntegration.deploy_to_vertex_ai()
         elif service_option == "test":
             # Run tests
             logger.info("Running tests...")
