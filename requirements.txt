@@ -26,10 +26,6 @@ ollama>=0.0.6
 # Web Interface
 gradio>=3.34.0
 
-# GCP Integration
-google-cloud-storage>=2.8.0
-google-cloud-aiplatform>=1.25.0
-
 # Monitoring
 prometheus-client>=0.16.0
 prometheus-fastapi-instrumentator>=5.9.1
