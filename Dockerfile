@@ -35,9 +35,12 @@ COPY . .
 RUN mkdir -p /app/data/pdfs /app/data/processed /app/data/vector_db /app/static /app/tests
 
 # Expose ports
-EXPOSE 8000  # FastAPI
-EXPOSE 7860  # Gradio
-EXPOSE 8001  # Metrics
+# FastAPI
+EXPOSE 8000
+# Gradio
+EXPOSE 7860
+# Metrics
+EXPOSE 8001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
