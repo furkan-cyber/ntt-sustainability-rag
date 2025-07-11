@@ -818,11 +818,11 @@ For support and questions:
 
 - **GitHub Issues**: [Create an issue](https://github.com/furkan-cyber/ntt-sustainability-rag/issues)
 - **Documentation**: [Wiki](https://github.com/furkan-cyber/ntt-sustainability-rag/wiki)
-- **Email**: support@example.com
+- **Email**: furkanavcioglu11@gmail.com
 - **Discord**: [Join our community](https://discord.gg/example)
 
 ---
 
-**Made with ❤️ by the NTT DATA RAG Team**
+**Made with ❤️ by Furkan Avcıoğlu**
 
 *This README is automatically updated through our CI/CD pipeline.*
