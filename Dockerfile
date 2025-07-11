@@ -25,7 +25,7 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install NLTK data (must be after pip install)
+# Install NLTK data
 RUN python -m nltk.downloader punkt stopwords
 
 # Copy application code
@@ -34,13 +34,10 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p /app/data/pdfs /app/data/processed /app/data/vector_db /app/static /app/tests
 
-# Environment setup
-ENV GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
-
 # Expose ports
-EXPOSE 8000
-EXPOSE 7860
-EXPOSE 8001
+EXPOSE 8000  # FastAPI
+EXPOSE 7860  # Gradio
+EXPOSE 8001  # Metrics
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
