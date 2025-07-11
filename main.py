@@ -698,7 +698,7 @@ class RAGPipeline:
             logger.error(f"Multi-query error: {e}")
             return []
     
-    async def _combine_and_rerank(self, retrieval_methods: List[Tuple[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    async def _combine_and_rerank(self, retrieval_methods: List[Tuple[str, List[Dict[str, Any]]]]) -> List[Dict[str, Any]]:
         """Advanced result combination and reranking"""
         combined = []
         
