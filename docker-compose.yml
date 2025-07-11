@@ -12,10 +12,9 @@ services:
       - ./data:/app/data
       - ./static:/app/static
       - ./.env:/app/.env
+      - ./service-account.json:/app/service-account.json
     environment:
       - SERVICE_OPTION=${SERVICE_OPTION:-api}
-    depends_on:
-      - ollama
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
